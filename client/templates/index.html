@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minesweeper AI</title>
+    <style>
+        .container {
+            display: flex;
+        }
+        .board {
+            display: grid;
+            grid-template-columns: repeat(10, 30px);
+            grid-template-rows: repeat(10, 30px);
+            gap: 2px;
+            margin: 10px;
+        }
+        .cell {
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #000;
+        }
+        .mine {
+            background-color: red;
+        }
+        .safe {
+            background-color: green;
+        }
+        .hidden {
+            background-color: lightgray;
+        }
+    </style>
+</head>
+<body>
+    <h1>Minesweeper AI</h1>
+    <div class="container">
+        <div class="board" id="board"></div>
+        <div class="board" id="answerBoard"></div>
+    </div>
+    <button id="startBtn">Start AI</button>
+    <div id="moveLog"></div>
+
+    <script>
+        const boardElement = document.getElementById('board');
+        const answerBoardElement = document.getElementById('answerBoard');
+        const startBtn = document.getElementById('startBtn');
+        const moveLog = document.getElementById('moveLog');
+        let boardState = Array(100).fill(0); // 10x10 보드 초기 상태
+        let revealedCount = 0; // 드러난 안전지대 개수
+
+        let answerBoard = {{ board | safe }};
+        
+        function renderBoard() {
+            boardElement.innerHTML = '';
+            for (let i = 0; i < 100; i++) {
+                const cell = document.createElement('div');
+                cell.classList.add('cell');
+                if (boardState[i] === -1) {
+                    cell.classList.add('mine');
+                } else if (boardState[i] > 0) {
+                    cell.classList.add('safe');
+                    cell.innerText = boardState[i];
+                } else {
+                    cell.classList.add('hidden');
+                }
+                boardElement.appendChild(cell);
+            }
+        }
+
+        function renderAnswerBoard() {
+            answerBoardElement.innerHTML = '';
+            for (let i = 0; i < 100; i++) {
+                const cell = document.createElement('div');
+                cell.classList.add('cell');
+                if (answerBoard[Math.floor(i / 10)][i % 10] === -1) {
+                    cell.classList.add('mine');
+                } else {
+                    cell.innerText = answerBoard[Math.floor(i / 10)][i % 10];
+                }
+                answerBoardElement.appendChild(cell);
+            }
+        }
+
+        async function aiMove() {
+            const response = await fetch('/move', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ state: boardState })
+            });
+            const data = await response.json();
+            const action = data.action;
+            const row = Math.floor(action / 10);
+            const col = action % 10;
+
+            moveLog.innerText = `AI selected: (${row}, ${col})`;
+
+            boardState = data.observation;
+
+            if (data.done) {
+                renderBoard();
+                alert(`Game Over! AI ${data.reward === 0 ? 'hit a mine' : 'cleared the board'} with score: ${revealedCount}`);
+                return;
+            }
+
+            revealedCount += data.reward;
+            renderBoard();
+
+            if (!data.done) {
+                setTimeout(aiMove, 1000); // 1초 후 다음 AI 움직임
+            }
+        }
+
+        startBtn.addEventListener('click', async () => {
+            const response = await fetch('/reset', {
+                method: 'POST'
+            });
+            const data = await response.json();
+            answerBoard = data.board;
+            boardState = Array(100).fill(0);
+            revealedCount = 0;
+            renderBoard();
+            renderAnswerBoard();
+            aiMove();
+        });
+
+        renderBoard();
+        renderAnswerBoard();
+    </script>
+</body>
+</html>

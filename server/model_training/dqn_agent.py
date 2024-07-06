@@ -24,12 +24,12 @@ class DQNAgent:
         self.state_size = state_size
         self.action_size = action_size
         self.memory = deque(maxlen=2000)
-        self.gamma = 0.95            # 할인 계수
-        self.epsilon = 1.0           # 탐험 초기값
-        self.epsilon_min = 0.01      # 탐험 최소값
-        self.epsilon_decay = 0.995   # 탐험 감소율
-        self.learning_rate = 0.001   # 학습률
-        self.batch_size = 32         # 배치 크기
+        self.gamma = 0.95
+        self.epsilon = 1.0
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
+        self.learning_rate = 0.001
+        self.batch_size = 32
         self.model = DQN(state_size, action_size).to(device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
         self.criterion = nn.MSELoss()
@@ -38,18 +38,15 @@ class DQNAgent:
         self.memory.append((state, action, reward, next_state, done))
 
     def act(self, state):
-        valid_actions = [i for i in range(self.action_size) if state[i] == 0]
-        if len(valid_actions) == 0:
-            return random.randrange(self.action_size)  # 모든 셀이 선택된 경우 무작위 선택
         if np.random.rand() <= self.epsilon:
-            return random.choice(valid_actions)
+            return random.randrange(self.action_size)
         state = torch.FloatTensor(state).unsqueeze(0).to(device)
         act_values = self.model(state)
-        act_values = act_values.cpu().detach().numpy().flatten()
-        valid_act_values = {action: act_values[action] for action in valid_actions}
-        return max(valid_act_values, key=valid_act_values.get)
+        return torch.argmax(act_values[0]).item()
 
     def replay(self, batch_size):
+        if len(self.memory) < batch_size:
+            return
         minibatch = random.sample(self.memory, batch_size)
         for state, action, reward, next_state, done in minibatch:
             target = reward

@@ -3,9 +3,9 @@ import torch
 import torch.nn as nn
 import os
 import numpy as np
-from minesweeper_env import MinesweeperEnv
+from gym_minesweeper.minesweeper_env import MinesweeperEnv
 
-app = Flask(__name__, template_folder="../client/templates", static_folder="../client/static")
+app = Flask(__name__, template_folder="client/templates", static_folder="client/static")
 
 class DQN(nn.Module):
     def __init__(self, state_size, action_size):
@@ -21,8 +21,8 @@ class DQN(nn.Module):
 
 # 로드된 모델 (미리 학습된 모델을 로드)
 model = DQN(state_size=100, action_size=100)  # 10x10 보드 기준
-model_path = os.path.join('model_training/models', 'saved_model_500.pth')
-model.load_state_dict(torch.load(model_path))
+model_path = os.path.join('server', 'model_training', 'models', 'saved_model_100.pth')
+model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
 model.eval()
 
 # Minesweeper 환경 초기화

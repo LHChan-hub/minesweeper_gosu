@@ -10,7 +10,7 @@ class MinesweeperEnv(gym.Env):
         self.cols = cols
         self.mines = mines
         self.action_space = spaces.Discrete(rows * cols)
-        self.observation_space = spaces.Box(low=0, high=1, shape=(rows * cols,), dtype=np.int32)
+        self.observation_space = spaces.Box(low=0, high=2, shape=(rows * cols,), dtype=np.int32)
         self.reset()
         self.first_step = True
 
@@ -37,7 +37,6 @@ class MinesweeperEnv(gym.Env):
         col = action % self.cols
 
         if self.selected[row, col]:
-            # 이미 선택된 위치는 다시 선택할 수 없습니다.
             return self._get_observation(), 0, False, {}
 
         if self.first_step:
@@ -46,10 +45,10 @@ class MinesweeperEnv(gym.Env):
 
         if self.board[row, col] == -1:
             self.done = True
-            reward = 0  # 지뢰를 선택하면 게임이 종료되고, 점수는 그대로 유지됩니다.
+            reward = -1
         else:
             self._reveal(row, col)
-            reward = 1  # 안전한 셀을 선택하면 1의 보상을 줍니다.
+            reward = 1
             if self.board[row, col] == 0:
                 self._reveal_safe_areas(row, col)
             self.safe_cells_count += 1
@@ -99,7 +98,23 @@ class MinesweeperEnv(gym.Env):
 
     def render(self, mode='human'):
         print("Board:")
-        print(self.board)
-        print("Selected:")
-        print(self.selected.astype(int))
+        for row in range(self.rows):
+            for col in range(self.cols):
+                if self.selected[row, col]:
+                    print(self.board[row, col], end=' ')
+                else:
+                    print('.', end=' ')
+            print()
         print(f"Score: {self.score}")
+
+# 환경 테스트
+if __name__ == "__main__":
+    env = MinesweeperEnv()
+    obs, info = env.reset()
+    env.render()
+    done = False
+    while not done:
+        action = env.action_space.sample()  # 무작위 행동 선택
+        obs, reward, done, _ = env.step(action)
+        env.render()
+        print(f"Action: {action}, Reward: {reward}, Done: {done}")

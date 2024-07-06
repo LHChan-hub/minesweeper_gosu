@@ -1,0 +1,9 @@
+# Python
+__pychache__
+venv/
+
+# Editors
+.vscode/
+
+# Other files
+server/model_training/models/

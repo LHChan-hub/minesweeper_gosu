@@ -1,56 +1,125 @@
-from flask import Flask, request, render_template, jsonify
+from flask import Flask, render_template, jsonify
 import torch
-import torch.nn as nn
-import os
 import numpy as np
-from gym_minesweeper.minesweeper_env import MinesweeperEnv
+import os
+import sys
+import logging
 
-app = Flask(__name__, template_folder="client/templates", static_folder="client/static")
+current_dir = os.path.dirname(__file__)
+sys.path.append(os.path.join(current_dir, 'server', 'model_training'))
 
-class DQN(nn.Module):
-    def __init__(self, state_size, action_size):
-        super(DQN, self).__init__()
-        self.fc1 = nn.Linear(state_size, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, action_size)
+from dqn_agent import DQNAgent
 
-    def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        return self.fc3(x)
+app = Flask(__name__, template_folder='client/templates', static_folder='client/static')
 
-# 로드된 모델 (미리 학습된 모델을 로드)
-model = DQN(state_size=100, action_size=100)  # 10x10 보드 기준
-model_path = os.path.join('server', 'model_training', 'models', 'saved_model_100.pth')
-model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
-model.eval()
+model_path = os.path.join(current_dir, 'server', 'model_training', 'models', 'saved_model_temp.pth')
 
-# Minesweeper 환경 초기화
-env = MinesweeperEnv()
+# 로그 설정
+logging.basicConfig(level=logging.DEBUG)
+
+# 에이전트 설정
+state_dim = 100  # 예시로 설정 (10x10 지뢰찾기 보드)
+action_dim = 100
+agent = DQNAgent(state_dim=state_dim, action_dim=action_dim)
+
+# 환경을 직접 초기화하고 상태를 관리
+class SimpleMinesweeper:
+    def __init__(self, width=10, height=10, num_mines=10):
+        self.width = width
+        self.height = height
+        self.num_mines = num_mines
+        self.board = np.zeros((width, height), dtype=int)
+        self.revealed = np.zeros((width, height), dtype=bool)
+        self.mines = set()
+        self.selected_positions = set()  # 이미 선택된 위치를 추적
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.board.fill(0)
+        self.revealed.fill(False)
+        self.mines = set()
+        self.selected_positions = set()  # 초기화 시 선택된 위치도 초기화
+        self.score = 0
+        while len(self.mines) < self.num_mines:
+            x, y = np.random.randint(self.width), np.random.randint(self.height)
+            self.mines.add((x, y))
+        for (x, y) in self.mines:
+            self.board[x, y] = -1
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < self.width and 0 <= ny < self.height and self.board[nx, ny] != -1:
+                        self.board[nx, ny] += 1
+        return self.get_state(), self.board.tolist()
+
+    def step(self, action):
+        x, y = divmod(action, self.width)
+        if (x, y) in self.selected_positions:  # 이미 선택된 위치면 선택 불가
+            return self.get_state(), -1, False, {}
+
+        self.selected_positions.add((x, y))  # 위치 추가
+        if self.board[x, y] == -1:
+            self.revealed[x, y] = True
+            return self.get_state(), -10, True, {}
+        self.revealed[x, y] = True
+        self.score += 1
+        return self.get_state(), self.board[x, y], self.is_done(), {}
+
+    def get_state(self):
+        state = np.where(self.revealed, self.board, -1)
+        return state
+
+    def is_done(self):
+        return np.all(self.revealed | (self.board == -1))
+
+    def render(self, mode='human', close=False):
+        pass
+
+env = SimpleMinesweeper()
 
 @app.route('/')
 def index():
-    return render_template('index.html', board=env.board.tolist())
+    return render_template('index.html')
 
-@app.route('/reset', methods=['POST'])
+@app.route('/reset')
 def reset():
-    global env
-    env.reset()
-    return jsonify({'board': env.board.tolist()})
+    state, solution = env.reset()
+    return jsonify({"status": "reset successful", "solution": solution})
 
-@app.route('/move', methods=['POST'])
-def move():
-    data = request.json
-    state = np.array(data['state'])
-    state_tensor = torch.FloatTensor(state).unsqueeze(0)
-    action = torch.argmax(model(state_tensor)[0]).item()
+@app.route('/predict')
+def predict():
+    if os.path.exists(model_path):
+        agent.load_model(model_path)
+        logging.info(f"Model loaded successfully from {model_path}")
+        state, solution = env.get_state(), env.board.tolist()
+        done = False
+        predictions = []
+        last_action = None
+        num_actions = 0
 
-    # 한 번 선택한 위치를 다시 선택하지 않도록 처리
-    while state[action] != 0:
-        action = (action + 1) % 100
+        while not done:
+            action = agent.act(state.flatten(), env.selected_positions)  # 선택된 위치 전달
+            last_action = action
+            x, y = divmod(action, env.width)
+            env.selected_positions.add((x, y))  # 위치 추가
+            next_state, reward, done, _ = env.step(action)
+            logging.debug(f"Action taken: {action} -> (x: {x}, y: {y}), Reward: {reward}, Done: {done}")
+            state = next_state
+            predictions.append({
+                'x': int(x),
+                'y': int(y),
+                'reward': float(reward),
+                'done': bool(done),
+                'state': state.tolist()  # 상태 정보를 추가하여 확인
+            })
+            num_actions += 1
+            if done:
+                break
 
-    obs, reward, done, _ = env.step(action)
-    return jsonify({'action': action, 'observation': obs.tolist(), 'reward': reward, 'done': done})
+        return jsonify(predictions=predictions, solution=solution, last_action=last_action, num_actions=num_actions)
+    else:
+        return jsonify({"error": "Model not found."})
 
 if __name__ == '__main__':
     app.run(debug=True)

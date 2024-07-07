@@ -1,136 +1,115 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Minesweeper AI</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <style>
-        .container {
-            display: flex;
-        }
-        .board {
-            display: grid;
-            grid-template-columns: repeat(10, 30px);
-            grid-template-rows: repeat(10, 30px);
-            gap: 2px;
-            margin: 10px;
-        }
-        .cell {
-            width: 30px;
-            height: 30px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border: 1px solid #000;
-        }
-        .mine {
-            background-color: red;
-        }
-        .safe {
-            background-color: green;
-        }
-        .hidden {
-            background-color: lightgray;
-        }
-    </style>
+    <title>Minesweeper Prediction</title>
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 </head>
 <body>
-    <h1>Minesweeper AI</h1>
-    <div class="container">
-        <div class="board" id="board"></div>
-        <div class="board" id="answerBoard"></div>
+    <h1>Minesweeper Prediction</h1>
+    <button id="resetButton">Reset Board</button>
+    <button id="startButton">Start AI</button>
+    <div id="game-container">
+        <div id="board"></div>
+        <div id="solution-board"></div>
     </div>
-    <button id="startBtn">Start AI</button>
-    <div id="moveLog"></div>
-
+    <div id="last-action"></div>
+    <div id="num-actions"></div>
     <script>
-        const boardElement = document.getElementById('board');
-        const answerBoardElement = document.getElementById('answerBoard');
-        const startBtn = document.getElementById('startBtn');
-        const moveLog = document.getElementById('moveLog');
-        let boardState = Array(100).fill(0); // 10x10 보드 초기 상태
-        let revealedCount = 0; // 드러난 안전지대 개수
+        var solution = [];
 
-        let answerBoard = {{ board | safe }};
-        
-        function renderBoard() {
-            boardElement.innerHTML = '';
-            for (let i = 0; i < 100; i++) {
-                const cell = document.createElement('div');
-                cell.classList.add('cell');
-                if (boardState[i] === -1) {
-                    cell.classList.add('mine');
-                } else if (boardState[i] > 0) {
-                    cell.classList.add('safe');
-                    cell.innerText = boardState[i];
+        function resetBoard() {
+            $.getJSON('/reset', function(data) {
+                if (data.error) {
+                    $('#board').html('<p>' + data.error + '</p>');
                 } else {
-                    cell.classList.add('hidden');
+                    solution = data.solution;
+                    renderBoard(data.solution);
+                    $('#last-action').text('');
+                    $('#num-actions').text('');
                 }
-                boardElement.appendChild(cell);
-            }
+            });
         }
 
-        function renderAnswerBoard() {
-            answerBoardElement.innerHTML = '';
-            for (let i = 0; i < 100; i++) {
-                const cell = document.createElement('div');
-                cell.classList.add('cell');
-                if (answerBoard[Math.floor(i / 10)][i % 10] === -1) {
-                    cell.classList.add('mine');
+        function startAI() {
+            $.getJSON('/predict', function(data) {
+                if (data.error) {
+                    $('#board').html('<p>' + data.error + '</p>');
                 } else {
-                    cell.innerText = answerBoard[Math.floor(i / 10)][i % 10];
+                    var predictions = data.predictions;
+                    var lastAction = data.last_action;
+                    var numActions = data.num_actions;
+                    function revealCell(index) {
+                        if (index >= predictions.length) return;
+                        var x = predictions[index].x;
+                        var y = predictions[index].y;
+                        var reward = predictions[index].reward;
+                        var done = predictions[index].done;
+                        var state = predictions[index].state;  // 상태 확인용 추가
+                        var cell = $('#cell-' + x + '-' + y);
+                        if (reward < 0) {
+                            cell.addClass('mine');
+                        } else {
+                            cell.addClass('safe').text(solution[x][y]);
+                        }
+                        console.log('State at step ' + index + ':', state);  // 상태 출력
+                        if (!done) {
+                            setTimeout(function() {
+                                revealCell(index + 1);
+                            }, 1000); // 1초 후 다음 셀 선택
+                        }
+                    }
+                    revealCell(0);
+
+                    var lastX = Math.floor(lastAction / 10);
+                    var lastY = lastAction % 10;
+                    $('#last-action').text('Last Action: (' + lastX + ', ' + lastY + ')');
+                    $('#num-actions').text('Number of Actions: ' + numActions);
                 }
-                answerBoardElement.appendChild(cell);
+            });
+        }
+
+        function renderBoard(solution) {
+            var board = $('#board');
+            var solutionBoard = $('#solution-board');
+            board.empty();
+            solutionBoard.empty();
+            for (var i = 0; i < 10; i++) {
+                for (var j = 0; j < 10; j++) {
+                    var cell = $('<div class="cell" id="cell-' + i + '-' + j + '"></div>');
+                    cell.data('x', i).data('y', j);
+                    board.append(cell);
+
+                    var solCell = $('<div class="cell"></div>');
+                    if (solution[i][j] == -1) {
+                        solCell.addClass('mine');
+                    } else {
+                        solCell.text(solution[i][j]);
+                    }
+                    solutionBoard.append(solCell);
+                }
+                board.append('<br>');
+                solutionBoard.append('<br>');
             }
         }
 
-        async function aiMove() {
-            const response = await fetch('/move', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ state: boardState })
+        $(document).ready(function(){
+            $('#resetButton').click(function() {
+                resetBoard();
             });
-            const data = await response.json();
-            const action = data.action;
-            const row = Math.floor(action / 10);
-            const col = action % 10;
 
-            moveLog.innerText = `AI selected: (${row}, ${col})`;
-
-            boardState = data.observation;
-
-            if (data.done) {
-                renderBoard();
-                alert(`Game Over! AI ${data.reward === 0 ? 'hit a mine' : 'cleared the board'} with score: ${revealedCount}`);
-                return;
-            }
-
-            revealedCount += data.reward;
-            renderBoard();
-
-            if (!data.done) {
-                setTimeout(aiMove, 1000); // 1초 후 다음 AI 움직임
-            }
-        }
-
-        startBtn.addEventListener('click', async () => {
-            const response = await fetch('/reset', {
-                method: 'POST'
+            $('#startButton').click(function() {
+                startAI();
             });
-            const data = await response.json();
-            answerBoard = data.board;
-            boardState = Array(100).fill(0);
-            revealedCount = 0;
-            renderBoard();
-            renderAnswerBoard();
-            aiMove();
+
+            $('#board').on('click', '.cell', function() {
+                var x = $(this).data('x');
+                var y = $(this).data('y');
+                alert('주변 지뢰 개수: ' + $(this).text());
+            });
+
+            resetBoard();
         });
-
-        renderBoard();
-        renderAnswerBoard();
     </script>
 </body>
 </html>

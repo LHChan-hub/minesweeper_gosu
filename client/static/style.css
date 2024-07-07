@@ -1,0 +1,26 @@
+.cell {
+    width: 30px;
+    height: 30px;
+    display: inline-block;
+    text-align: center;
+    vertical-align: top;
+    border: 1px solid black;
+    line-height: 30px;
+}
+.mine {
+    background-color: red;
+}
+.safe {
+    background-color: green;
+}
+#game-container {
+    display: flex;
+    justify-content: space-between;
+}
+#board, #solution-board {
+    margin: 10px;
+}
+#last-action, #num-actions {
+    margin-top: 20px;
+    font-weight: bold;
+}

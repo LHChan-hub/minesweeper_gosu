@@ -12,7 +12,7 @@ from dqn_agent import DQNAgent
 
 app = Flask(__name__, template_folder='client/templates', static_folder='client/static')
 
-model_path = os.path.join(current_dir, 'server', 'model_training', 'models', 'saved_model_temp.pth')
+model_path = os.path.join(current_dir, 'server', 'model_training', 'models', 'saved_model.pth')
 
 # 로그 설정
 logging.basicConfig(level=logging.DEBUG)
@@ -31,7 +31,7 @@ class SimpleMinesweeper:
         self.board = np.zeros((width, height), dtype=int)
         self.revealed = np.zeros((width, height), dtype=bool)
         self.mines = set()
-        self.selected_positions = set()  # 이미 선택된 위치를 추적
+        self.selected_positions = set()
         self.score = 0
         self.reset()
 
@@ -39,7 +39,7 @@ class SimpleMinesweeper:
         self.board.fill(0)
         self.revealed.fill(False)
         self.mines = set()
-        self.selected_positions = set()  # 초기화 시 선택된 위치도 초기화
+        self.selected_positions = set()
         self.score = 0
         while len(self.mines) < self.num_mines:
             x, y = np.random.randint(self.width), np.random.randint(self.height)
@@ -55,16 +55,17 @@ class SimpleMinesweeper:
 
     def step(self, action):
         x, y = divmod(action, self.width)
-        if (x, y) in self.selected_positions:  # 이미 선택된 위치면 선택 불가
-            return self.get_state(), -1, False, {}
+        if (x, y) in self.selected_positions:
+            return self.get_state(), 0, False, {}  # 이미 선택된 위치면 보상 0
 
-        self.selected_positions.add((x, y))  # 위치 추가
+        self.selected_positions.add((x, y))
         if self.board[x, y] == -1:
             self.revealed[x, y] = True
-            return self.get_state(), -10, True, {}
+            return self.get_state(), -10, True, {}  # 지뢰 선택 시 -10점 및 게임 종료
+
         self.revealed[x, y] = True
-        self.score += 1
-        return self.get_state(), self.board[x, y], self.is_done(), {}
+        self.score += 10
+        return self.get_state(), 10, self.is_done(), {}  # 지뢰가 아닌 칸 선택 시 +10점
 
     def get_state(self):
         state = np.where(self.revealed, self.board, -1)

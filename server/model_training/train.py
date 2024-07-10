@@ -1,13 +1,10 @@
 import sys
 import os
 import argparse
-import glob
-import matplotlib
-matplotlib.use('Agg')  # 여기서 백엔드를 Agg로 설정합니다.
 import matplotlib.pyplot as plt
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
-from itertools import cycle
+import json
+import itertools
 
 current_dir = os.path.dirname(__file__)
 gym_minesweeper_dir = os.path.abspath(os.path.join(current_dir, '../../gym_minesweeper'))
@@ -23,100 +20,155 @@ register(
 )
 
 from dqn_agent import BootstrappedNoisyDQNAgent, device
+from hp_combination import HPCombination, hp_comb
+
+results_dir = os.path.join(current_dir, 'results')
+os.makedirs(results_dir, exist_ok=True)
+
+final_scores = []  # 최종 스코어를 저장할 리스트
+
+def save_board_and_selections(board, selections, episode, filename):
+    with open(filename, 'a') as f:
+        f.write(f"Episode {episode}:\n")
+        f.write("Final Board:\n")
+        for row in board:
+            f.write(' '.join(str(cell) for cell in row) + '\n')
+        f.write("\nModel Selections:\n")
+        for selection in selections:
+            x, y = selection if len(selection) == 2 else (selection[0], selection[1])
+            is_mine = board[x][y] == -1
+            f.write(f"({x}, {y}, {'Select'}): {'Mine' if is_mine else 'Safe'}\n")
+        f.write("\n\n")
+
+def plot_hyperparameter_results():
+    hp_ids = [f'hp{str(i).zfill(3)}' for i in range(len(final_scores))]
+    plt.figure(figsize=(10, 5))
+    plt.plot(hp_ids, final_scores, marker='o')
+    plt.xlabel('Hyperparameter ID')
+    plt.ylabel('Final Average Score')
+    plt.title('Final Average Score vs Hyperparameter ID')
+    plt.xticks(rotation=90)
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, 'final_scores.png'))
+    plt.close()
 
 def main(args):
-    envs = [gym.make('Minesweeper-v0') for _ in range(4)]
-    state_size = envs[0].observation_space.shape[0] * envs[0].observation_space.shape[1]
-    action_size = envs[0].action_space.n
-    agent = BootstrappedNoisyDQNAgent(state_dim=state_size, action_dim=action_size)
+    env = gym.make('Minesweeper-v0')
+    hp_idx = 0
 
-    if args.model_file:
-        model_path = os.path.join(current_dir, 'models', args.model_file)
-        if os.path.exists(model_path):
-            agent.load_model(model_path)
-            print(f"Model {args.model_file} loaded successfully.")
+    while hp_idx < 200:  # 최대 200개의 하이퍼파라미터 조합 테스트
+        params = hp_comb.get_current_params()
+        if params is None:
+            hp_comb.setup_next_test()
+            params = hp_comb.get_current_params()
+        
+        state_size = env.observation_space.shape[0]
+        action_size = env.action_space.n
+        agent = BootstrappedNoisyDQNAgent(state_dim=state_size, action_dim=action_size, **params)
+
+        if args.model_file:
+            model_path = os.path.join(current_dir, 'saved_model.pth')
+            if os.path.exists(model_path):
+                agent.load_model(model_path)
+                print(f"Model {args.model_file} loaded successfully.")
+            else:
+                print(f"No model found at {model_path}. Starting training from scratch.")
         else:
-            print(f"No model found at {model_path}. Starting training from scratch.")
-    else:
-        print("No model file specified. Starting training from scratch.")
+            print("No model file specified. Starting training from scratch.")
 
-    def save_model(agent, temp=False):
-        model_save_path = os.path.join(current_dir, 'models', 'saved_model.pth')
-        agent.save_model(model_save_path)
-        print(f"Model saved successfully at {model_save_path}.")
-        if not temp:
-            model_files = sorted(glob.glob(os.path.join(current_dir, 'models', 'saved_model_*.pth')))
-            if len(model_files) > 50:
-                os.remove(model_files[0])
-                print(f"Removed old model: {model_files[0]}")
+        def save_model(agent):
+            model_save_path = os.path.join(results_dir, f'saved_model_hp{hp_idx:03d}.pth')
+            agent.save_model(model_save_path)
+            print(f"Model saved successfully at {model_save_path}.")
 
-    # 학습 기록을 위한 리스트 초기화
-    rewards = []
-    epsilons = []
+        rewards = []
+        epsilons = []
 
-    def run_episode(env, e):
-        state = env.reset().flatten().to(device)
-        selected_positions = set()
-        total_reward = 0
-        for time in range(500):
-            action = agent.act(state, selected_positions)
-            x, y = divmod(action, int(env.width))
-            selected_positions.add((x, y))
-            next_state, reward, done, info = env.step(action)
-            next_state = next_state.flatten().to(device)
-            if not info.get('early_termination', False):
-                error = reward - agent.models[0](state.unsqueeze(0).to(device)).max(1)[0].item()
-                agent.remember(state, action, reward, next_state, done, error)
-            state = next_state
-            total_reward += reward
-            if done:
-                epsilon_percent = 100 - ((agent.epsilon - agent.epsilon_min) / (1.0 - agent.epsilon_min) * 100)
-                print(f"episode: {e + 1}/100000, score: {reward}, epsilon: {epsilon_percent:.2f}%")
-                break
-            if len(agent.memory.buffer) > agent.batch_size:
-                agent.replay()
-        return total_reward, agent.epsilon
+        def run_episode(agent, env, e):
+            state, _ = env.reset()
+            state = torch.tensor(state, dtype=torch.float32).to(device)
+            selected_positions = set()
+            total_reward = 0
+            terminated = False
+            while not terminated:
+                action = agent.act(state, selected_positions)
+                x, y = env.decode_action(action)
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        for e, env in zip(range(100000), cycle(envs)):
-            future = executor.submit(run_episode, env, e)
-            result = future.result()
-            rewards.append(result[0])
-            epsilons.append(result[1])
+                if x >= env.width or y >= env.height:
+                    print(f"Invalid action: {action} (x: {x}, y: {y}), skipping")
+                    continue
 
-            if (e + 1) % 1000 == 0:
-                save_model(agent, temp=True)
-                plot_training(rewards, epsilons, e + 1)
+                selected_positions.add((x, y))
 
-    final_model_save_path = os.path.join(current_dir, 'models', 'saved_model.pth')
-    agent.save_model(final_model_save_path)
-    print(f"Final model saved successfully at {final_model_save_path}.")
+                next_state, reward, terminated, _, _ = env.step(action)
+                next_state = torch.tensor(next_state, dtype=torch.float32).to(device)
+                if reward >= 10:  # 보상이 10 이상인 경우 가중치를 추가로 부여
+                    reward *= 2
+                error = abs(reward + agent.gamma * torch.max(agent.models[0](next_state)) - torch.max(agent.models[0](state))).item()
+                agent.remember(state, action, reward, next_state, terminated, error)
+                state = next_state
+                total_reward += reward
+                if len(agent.memory.buffer) > agent.batch_size:
+                    agent.replay()
+            return total_reward, agent.epsilon, env.board, selected_positions
 
-def plot_training(rewards, epsilons, episode):
-    episodes = list(range(1, len(rewards) + 1))
+        log_filename = os.path.join(results_dir, f'episode_logs_hp{hp_idx:03d}.txt')
+        if os.path.exists(log_filename):
+            os.remove(log_filename)
 
+        for e in range(hp_comb.max_episodes):
+            total_reward, epsilon, board, selections = run_episode(agent, env, e)
+            rewards.append(total_reward)
+            epsilons.append(epsilon)
+
+            if e < 50:
+                save_board_and_selections(board, selections, e + 1, log_filename)
+
+            print(f"Episode: {e + 1}, Total Reward: {total_reward}, Epsilon: {epsilon}")
+
+        recent_rewards = rewards[-50:]
+        average_score = sum(recent_rewards) / 50
+        final_scores.append(average_score)  # 최종 스코어 저장
+
+        hp_comb.save_results(hp_idx, rewards)
+
+        plot_training(rewards, epsilons, hp_comb.max_episodes, hp_idx)
+        plot_hyperparameter_results()  # 최종 스코어 그래프 업데이트
+
+        if average_score < 50:
+            print(f"Low average score detected. Restarting training with new parameters.")
+            hp_comb.update_params(recent_rewards)
+            hp_comb.reset()
+        else:
+            save_model(agent)
+            print(f"Final model saved successfully at {results_dir}/saved_model_hp{hp_idx:03d}.pth.")
+            break
+
+        hp_idx += 1
+
+def plot_training(rewards, epsilons, episode, hp_idx):
     plt.figure(figsize=(12, 6))
 
     plt.subplot(1, 2, 1)
-    plt.plot(episodes, rewards, label='Rewards per Episode')
+    plt.plot(rewards, label='Rewards per Episode')
     plt.xlabel('Episodes')
     plt.ylabel('Total Reward')
     plt.title('Rewards over Episodes')
     plt.legend()
 
     plt.subplot(1, 2, 2)
-    plt.plot(episodes, [100 - (epsilon * 100) for epsilon in epsilons], label='Epsilon per Episode')
+    plt.plot(epsilons, label='Epsilon per Episode')
     plt.xlabel('Episodes')
-    plt.ylabel('Epsilon (%)')
+    plt.ylabel('Epsilon')
     plt.title('Epsilon over Episodes')
     plt.legend()
 
     plt.tight_layout()
-    plt.savefig('training_plot.png')
+    plt.savefig(os.path.join(results_dir, f'training_plot_hp{hp_idx:03d}.png'))
     plt.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_file', type=str, help="The model file to load for continued training")
+    parser.add_argument('--model_file', type=str, default=None, help='Path to the model file to load')
     args = parser.parse_args()
     main(args)

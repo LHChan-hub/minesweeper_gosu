@@ -1,19 +1,34 @@
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-import numpy as np
-import random
+from torch.cuda.amp import autocast, GradScaler
 from collections import deque
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.buffer = deque(maxlen=capacity)
 
-class NoisyNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim):
-        super(NoisyNetwork, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, output_dim)
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
+
+    def sample(self, batch_size):
+        batch = random.sample(self.buffer, batch_size)
+        state, action, reward, next_state, done = zip(*batch)
+        return np.array(state), np.array(action), np.array(reward), np.array(next_state), np.array(done)
+
+    def __len__(self):
+        return len(self.buffer)
+
+class QNetwork(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(QNetwork, self).__init__()
+        self.fc1 = nn.Linear(input_dim, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, output_dim)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
@@ -21,102 +36,100 @@ class NoisyNetwork(nn.Module):
         x = self.fc3(x)
         return x
 
-class PrioritizedReplayBuffer:
-    def __init__(self, capacity, alpha):
-        self.capacity = capacity
-        self.alpha = alpha
-        self.buffer = deque(maxlen=capacity)
-        self.priorities = deque(maxlen=capacity)
+class DQNAgent:
+    def __init__(self, env, initial_tau=1.0, min_tau=0.01, decay_steps=40000, power=0.1):
+        self.env = env
+        self.buffer_size = 100000
+        self.batch_size = 128
+        self.gamma = 0.98
+        self.learning_rate = 0.00025
+        self.target_update_interval = 1000
 
-    def add(self, error, transition):
-        priority = (abs(error) + 1e-5) ** self.alpha
-        self.buffer.append(transition)
-        self.priorities.append(priority)
+        self.replay_buffer = ReplayBuffer(self.buffer_size)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def sample(self, batch_size, beta):
-        priorities = np.array(self.priorities)
-        probabilities = priorities / priorities.sum()
-        indices = np.random.choice(len(self.buffer), batch_size, p=probabilities)
-        samples = [self.buffer[idx] for idx in indices]
-        weights = (len(self.buffer) * probabilities[indices]) ** (-beta)
-        weights = weights / weights.max()
-        batch = list(zip(*samples))
-        states = torch.tensor(np.array(batch[0]), dtype=torch.float32).to(device)
-        actions = torch.tensor(batch[1], dtype=torch.int64).to(device)
-        rewards = torch.tensor(batch[2], dtype=torch.float32).to(device)
-        next_states = torch.tensor(np.array(batch[3]), dtype=torch.float32).to(device)
-        dones = torch.tensor(batch[4], dtype=torch.float32).to(device)
-        return states, actions, rewards, next_states, dones, indices, torch.tensor(weights, dtype=torch.float32).to(device)
+        self.q_network = QNetwork(env.observation_space.shape[0], env.action_space.n).to(self.device)
+        self.target_network = QNetwork(env.observation_space.shape[0], env.action_space.n).to(self.device)
+        self.target_network.load_state_dict(self.q_network.state_dict())
+        self.target_network.eval()
 
-    def update_priorities(self, indices, errors):
-        for idx, error in zip(indices, errors):
-            self.priorities[idx] = (abs(error) + 1e-5) ** self.alpha
-
-    def __len__(self):
-        return len(self.buffer)
-
-class BootstrappedNoisyDQNAgent:
-    def __init__(self, state_dim, action_dim, gamma=0.99, batch_size=32, buffer_size=10000, alpha=0.6, epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.995, hidden_dim=256):
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.gamma = gamma
-        self.batch_size = batch_size
-        self.memory = PrioritizedReplayBuffer(buffer_size, alpha)
-        self.epsilon = epsilon_start
-        self.epsilon_end = epsilon_end
-        self.epsilon_decay = epsilon_decay
-        self.hidden_dim = hidden_dim
-        self.models = [NoisyNetwork(state_dim, action_dim, hidden_dim).to(device)]
-        self.target_models = [NoisyNetwork(state_dim, action_dim, hidden_dim).to(device)]
-        self.optimizers = [optim.Adam(model.parameters(), lr=0.001) for model in self.models]
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.learning_rate)
         self.loss_fn = nn.SmoothL1Loss()
 
-    def act(self, state, selected_positions):
-        if random.random() < self.epsilon:
-            return random.randint(0, self.action_dim - 1)
-        else:
-            state = state.to(device)
-            q_values = self.models[0](state)
-            q_values = q_values.cpu().detach().numpy()
-            valid_indices = [pos[0] * int(np.sqrt(self.state_dim)) + pos[1] for pos in selected_positions if pos[0] * int(np.sqrt(self.state_dim)) + pos[1] < self.action_dim]
-            q_values[valid_indices] = -np.inf
-            return np.argmax(q_values)
+        self.scaler = GradScaler()
 
-    def remember(self, state, action, reward, next_state, done, error):
-        self.memory.add(error, (state.cpu().numpy(), action, reward, next_state.cpu().numpy(), done))
+        self._initialize_weights()
 
-    def replay(self):
-        if len(self.memory) < self.batch_size:
-            return
-        states, actions, rewards, next_states, dones, indices, weights = self.memory.sample(self.batch_size, beta=0.4)
-        for model, target_model, optimizer in zip(self.models, self.target_models, self.optimizers):
-            q_values = model(states).gather(1, actions.unsqueeze(1)).squeeze(1)
-            next_q_values = target_model(next_states).max(1)[0]
-            target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
-            loss = (weights * self.loss_fn(q_values, target_q_values)).mean()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            errors = torch.abs(q_values - target_q_values).detach().cpu().numpy()
-            self.memory.update_priorities(indices, errors)
+        self.steps = 0
+        self.tau = initial_tau
+        self.min_tau = min_tau
+        self.decay_steps = decay_steps
+        self.power = power
+        self.visited = set()
 
-        self.epsilon = max(self.epsilon_end, self.epsilon_decay * self.epsilon)
+    def _initialize_weights(self):
+        for m in self.q_network.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
-    def save_model(self, path):
-        torch.save({
-            'model_state_dict': self.models[0].state_dict(),
-            'target_model_state_dict': self.target_models[0].state_dict(),
-            'optimizer_state_dict': self.optimizers[0].state_dict()
-        }, path)
+    def select_action(self, state):
+        state_tuple = tuple(state)
+        if state_tuple in self.visited:
+            return None
 
-    def load_model(self, path):
-        checkpoint = torch.load(path)
-        self.models[0].load_state_dict(checkpoint['model_state_dict'])
-        self.target_models[0].load_state_dict(checkpoint['target_model_state_dict'])
-        self.optimizers[0].load_state_dict(checkpoint['optimizer_state_dict'])
+        state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            q_values = self.q_network(state).cpu().numpy().flatten()
 
-    def update_state_dim(self, new_state_dim):
-        self.state_dim = new_state_dim
-        self.models = [NoisyNetwork(new_state_dim, self.action_dim, self.hidden_dim).to(device)]
-        self.target_models = [NoisyNetwork(new_state_dim, self.action_dim, self.hidden_dim).to(device)]
-        self.optimizers = [optim.Adam(model.parameters(), lr=0.001) for model in self.models]
+        q_values = q_values - np.max(q_values)
+        exp_q = np.exp(q_values / self.tau)
+        probs = exp_q / np.sum(exp_q)
+
+        if np.any(np.isnan(probs)):
+            probs = np.ones_like(probs) / len(probs)
+
+        action = np.random.choice(range(len(probs)), p=probs)
+
+        self.visited.add(state_tuple)
+
+        return action
+
+    def update(self, episode):
+        if len(self.replay_buffer) < self.batch_size:
+            return None
+
+        state, action, reward, next_state, done = self.replay_buffer.sample(self.batch_size)
+
+        state = torch.FloatTensor(np.array(state)).to(self.device)
+        next_state = torch.FloatTensor(np.array(next_state)).to(self.device)
+        action = torch.LongTensor(np.array(action)).to(self.device)
+        reward = torch.FloatTensor(np.array(reward)).to(self.device)
+        done = torch.FloatTensor(np.array(done)).to(self.device)
+
+        with autocast():
+            q_values = self.q_network(state)
+            next_q_values = self.target_network(next_state)
+            q_value = q_values.gather(1, action.unsqueeze(1)).squeeze(1)
+            next_q_value = next_q_values.max(1)[0]
+            expected_q_value = reward + self.gamma * next_q_value * (1 - done)
+
+            td_errors = expected_q_value.detach() - q_value
+            loss = (td_errors ** 2).mean()
+            loss = torch.clamp(loss, max=1e2)
+
+        self.optimizer.zero_grad()
+        self.scaler.scale(loss).backward()
+        nn.utils.clip_grad_norm_(self.q_network.parameters(), 1.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+
+        self.steps += 1
+        if self.steps % self.target_update_interval == 0:
+            self.target_network.load_state_dict(self.q_network.state_dict())
+
+        tau_factor = (self.decay_steps - episode) / self.decay_steps
+        self.tau = max(self.min_tau, self.tau * tau_factor ** self.power)
+
+        return loss.item()

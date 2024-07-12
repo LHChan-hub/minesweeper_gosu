@@ -8,3 +8,4 @@ venv/
 # Other files
 server/model_training/models/
 server/model_training/results/
+server/model_training/training_log.txt

@@ -1,69 +1,86 @@
 import torch
-import os
-from gym_minesweeper.minesweeper_env import MinesweeperEnv
-from dqn_agent import DQNAgent
-from logger import Logger
+from env import MineSweeperEnv
+from agent import DQNAgent
+import log
+from checkpoint import save_checkpoint, load_checkpoint
+from utils import save_model, load_hyperparameters
+from model_test import evaluate_model
 
-def train():
-    env = MinesweeperEnv()
-    agent = DQNAgent(env, initial_tau=1.0, min_tau=0.01, decay_steps=40000, power=0.00005)  # Boltzmann 탐색 파라미터 설정
-    logger = Logger(result_dir='results')
+def train(agent, env, batch_size, save_interval, update_interval, resume=False):
+    episode = 0
+    total_steps = 0
+    best_total_reward = float('-inf')
 
-    model_dir = 'models'
-    if not os.path.exists(model_dir):
-        os.makedirs(model_dir)
+    if resume:
+        episode, total_steps, best_total_reward = load_checkpoint(agent)
 
-    num_episodes = 40000  # 총 에피소드 수 변경
-    save_interval = 1000
-    log_file = open("training_log.txt", "w")  # 로그 파일 열기
-
-    for episode in range(num_episodes):
-        state, _ = env.reset()
-        agent.visited.clear()  # 에피소드 시작 시 방문 기록 초기화
-        episode_reward = 0
-        episode_loss = 0
-        t = 0
+    try:
         while True:
-            action = agent.select_action(state)
-            if action is None:
-                state, _ = env.reset()  # 이미 방문한 상태를 선택한 경우 초기화
-                continue
+            state = env.reset()
+            total_reward = 0
 
-            next_state, reward, done, _ = env.step(action)
-            agent.replay_buffer.push(state, action, reward, next_state, done)
-            state = next_state
-            episode_reward += reward
+            while True:
+                action = agent.select_action(state)
+                next_state, reward, done, _ = env.step(action)
+                total_reward += reward
 
-            loss = agent.update(episode)
-            if loss:
-                episode_loss += loss
-                t += 1
+                agent.store_transition(state, action, next_state if not done else None, reward)
+                state = next_state
 
-            if done:
-                if episode_reward == 0:
-                    state, _ = env.reset()
-                    continue
-                avg_loss = episode_loss / t if t > 0 else 0
-                logger.log_episode(episode_reward, agent.tau, avg_loss)  # tau 값 로깅
+                agent.optimize_model(batch_size)
 
-                # 모든 에피소드마다 로그 출력
-                print(f"Episode {episode} ended with reward {episode_reward:.2f}, tau {agent.tau:.5f}, loss {avg_loss:.2f}")
-                # 로그 파일에 기록
-                log_file.write(f"Episode {episode} ended with reward {episode_reward:.2f}, tau {agent.tau:.5f}, loss {avg_loss:.2f}\n")
+                if done:
+                    agent.update_target()
+                    break
 
-                break
+                total_steps += 1
 
-        if (episode + 1) % save_interval == 0:
-            logger.plot_and_save(f'results_{episode + 1}')
-            model_path = os.path.join(model_dir, f'dqn_agent_{episode + 1}.pth')
-            torch.save(agent.q_network.state_dict(), model_path)
-            print(f"Saved interim results and model at episode {episode + 1}")
+            average_reward = agent.update_rewards_window(total_reward)
 
-    logger.plot_and_save('final_results')
-    model_path = os.path.join(model_dir, 'dqn_agent_final.pth')
-    torch.save(agent.q_network.state_dict(), model_path)
+            print(f"Episode {episode}, Total Reward: {total_reward}, Epsilon: {agent.epsilon}, Average Reward: {average_reward}")
 
-    log_file.close()  # 로그 파일 닫기
+            if total_reward > best_total_reward:
+                best_total_reward = total_reward
+                save_checkpoint(agent, episode, total_reward, total_steps)
+
+                # Evaluate model when achieving new best reward
+                avg_eval_steps = evaluate_model(agent, env)
+                print(f"Evaluation: Average Steps: {avg_eval_steps}")
+
+                # Adjust hyperparameters based on evaluation results
+                if avg_eval_steps > 70:  # Example condition
+                    agent.epsilon = max(agent.epsilon * 0.95, agent.epsilon_min)  # Adjust epsilon
+                    agent.lr *= 1.1  # Adjust learning rate
+                    print("Adjusting hyperparameters: Increased learning rate and decreased epsilon")
+
+            if (episode + 1) % update_interval == 0:
+                log.plot_rewards()
+                print(f"Graph updated at episode {episode + 1}")
+
+            if (episode + 1) % save_interval == 0:
+                save_checkpoint(agent, episode, total_reward, total_steps)
+
+            episode += 1
+
+    except KeyboardInterrupt:
+        print("Training interrupted. Saving current state...")
+        save_checkpoint(agent, episode, total_reward, total_steps)
+        save_model(agent, 'results/model.pth')
+        print("Checkpoint and model saved. Exiting...")
 
 if __name__ == "__main__":
-    train()
+    best_params = load_hyperparameters()
+    if best_params is None:
+        print('No hyperparameters found, cannot proceed with training.')
+    else:
+        env = MineSweeperEnv(width=10, height=10, n_mines=10,
+                             penalty_mine=best_params['penalty_mine'], reward_empty=best_params['reward_empty'], penalty_revisit=best_params['penalty_revisit'],
+                             proximity_reward=best_params['proximity_reward'], initial_exploration_bonus=best_params['initial_exploration_bonus'],
+                             periodic_bonus=best_params['periodic_bonus'], win_reward=best_params['win_reward'], step_penalty=best_params['step_penalty'],
+                             variant="extended_steps")
+        state_dim = env.observation_space[0]
+        action_dim = env.action_space
+
+        agent = DQNAgent(state_dim, action_dim, gamma=best_params['gamma'], epsilon=best_params['epsilon'], epsilon_decay=best_params['epsilon_decay'], epsilon_min=best_params['epsilon_min'], lr=best_params['lr'], epsilon_reset_threshold=best_params['epsilon_reset_threshold'], epsilon_reset_value=best_params['epsilon_reset_value'], fc1_units=best_params['fc1_units'], fc2_units=best_params['fc2_units'], fc3_units=best_params['fc3_units'])
+        
+        train(agent, env, batch_size=best_params['batch_size'], save_interval=1000, update_interval=1000, resume=True)
